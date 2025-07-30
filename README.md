@@ -3,7 +3,7 @@
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Overview
-This project demonstrates how to securely create and map memory sections using native Windows APIs. The provided code showcases techniques for handling memory securely, verifying system library integrity, and modifying memory sections safely. These practices are essential for applications that interact with system internals, ensuring both security and efficiency. 🛡️
+This project demonstrates how to securely create and map memory sections using native Windows APIs. The provided code showcases techniques for handling memory securely, verifying system library integrity, and modifying memory sections safely. These practices are essential for applications that interact with system internals, ensuring both security and efficiency against, for example, hooked functions within ntdll.dll. 🛡️
 
 ## 🚀 Features
 
