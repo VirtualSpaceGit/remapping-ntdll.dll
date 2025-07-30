@@ -32,7 +32,7 @@ This project demonstrates how to securely create and map memory sections using n
 
 ## Usage 🧪
 
-1. Compile the code with any C++ compiler that supports Windows system calls.
+1. Compile the code with any C++ compiler.
 2. Run the executable.
 3. The code will:
    - Load `ntdll.dll`
