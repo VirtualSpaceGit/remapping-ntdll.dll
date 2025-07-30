@@ -25,7 +25,7 @@ This project demonstrates how to securely create and map memory sections using n
   - All APIs (`NtCreateSection`, `NtMapViewOfSection`, `NtClose`) are dynamically resolved from `ntdll.dll`, ensuring that the functions used are the ones provided by the trusted system library. 
 
 - **Memory Integrity Validation**
-  - The program verifies the integrity of the memory by comparing the first page of `ntdll.dll` before and after mapping, preventing malicious alterations. 🛡
+  - The program verifies the integrity of the memory by comparing the first page of `ntdll.dll` before and after mapping, detecting, and preventing malicious alterations. 
 
 - **Memory Section Isolation**
   - The created section is isolated and modified securely in a way that doesn't impact the original `ntdll.dll` in memory, ensuring safe modifications without system instability. 
