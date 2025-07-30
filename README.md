@@ -30,7 +30,7 @@ This project demonstrates how to securely create and map memory sections using n
 - **Memory Section Isolation**
   - The created section is isolated and modified securely in a way that doesn't impact the original `ntdll.dll` in memory, ensuring safe modifications without system instability. 
 
-## 🛠️ Usage
+## Usage 🧪
 
 1. Compile the code with any C++ compiler that supports Windows system calls.
 2. Run the executable.
