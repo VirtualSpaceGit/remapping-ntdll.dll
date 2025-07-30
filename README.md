@@ -8,27 +8,27 @@ This project demonstrates how to securely create and map memory sections using n
 ## Features
 
 - **Dynamic Section Creation**
-  - Utilizes `NtCreateSection` to allocate a secure 2MB section of memory. 🧠
+  - Utilizes `NtCreateSection` to allocate a secure 2MB section of memory. 
   
 - **Memory Mapping**
-  - Maps the created section into the process's virtual address space using `NtMapViewOfSection`. 📦
+  - Maps the created section into the process's virtual address space using `NtMapViewOfSection`. 
 
 - **Memory Integrity Check**
-  - Compares the first 0x1000 bytes of the original `ntdll.dll` with the newly mapped section to ensure the code is untampered. 🔍
+  - Compares the first 0x1000 bytes of the original `ntdll.dll` with the newly mapped section to ensure the application code is untampered. 
 
 - **Safe Memory Modifications**
-  - Demonstrates secure modification by zeroing out the first 0x1000 bytes of the mapped section. 🔧
+  - Demonstrates secure modification by zeroing out the first 0x1000 bytes of the mapped section. 
 
 ## Security Measures
 
 - **API Resolution from Trusted Sources**
-  - All APIs (`NtCreateSection`, `NtMapViewOfSection`, `NtClose`) are dynamically resolved from `ntdll.dll`, ensuring that the functions used are the ones provided by the trusted system library. 📜
+  - All APIs (`NtCreateSection`, `NtMapViewOfSection`, `NtClose`) are dynamically resolved from `ntdll.dll`, ensuring that the functions used are the ones provided by the trusted system library. 
 
 - **Memory Integrity Validation**
-  - The program verifies the integrity of the memory by comparing the first page of `ntdll.dll` before and after mapping, preventing malicious alterations. 🛡️
+  - The program verifies the integrity of the memory by comparing the first page of `ntdll.dll` before and after mapping, preventing malicious alterations. 🛡
 
 - **Memory Section Isolation**
-  - The created section is isolated and modified securely in a way that doesn't impact the original `ntdll.dll` in memory, ensuring safe modifications without system instability. ⚡
+  - The created section is isolated and modified securely in a way that doesn't impact the original `ntdll.dll` in memory, ensuring safe modifications without system instability. 
 
 ## 🛠️ Usage
 
