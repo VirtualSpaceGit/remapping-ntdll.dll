@@ -5,13 +5,13 @@
 ## Overview
 This project demonstrates how to securely create and map memory sections using native Windows APIs. The provided code showcases techniques for handling memory securely, verifying system library integrity, and modifying memory sections safely. These practices are essential for applications that interact with system internals, ensuring both security and efficiency against, for example, hooked functions within ntdll.dll. 🛡️
 
-## 🚀 Features
+## Features
 
 - **Dynamic Section Creation**
   - Utilizes `NtCreateSection` to allocate a secure 2MB section of memory. 🧠
   
 - **Memory Mapping**
-  - Maps the created section into the process' virtual address space using `NtMapViewOfSection`. 📦
+  - Maps the created section into the process's virtual address space using `NtMapViewOfSection`. 📦
 
 - **Memory Integrity Check**
   - Compares the first 0x1000 bytes of the original `ntdll.dll` with the newly mapped section to ensure the code is untampered. 🔍
@@ -19,7 +19,7 @@ This project demonstrates how to securely create and map memory sections using n
 - **Safe Memory Modifications**
   - Demonstrates secure modification by zeroing out the first 0x1000 bytes of the mapped section. 🔧
 
-## 🔒 Security Measures
+## Security Measures
 
 - **API Resolution from Trusted Sources**
   - All APIs (`NtCreateSection`, `NtMapViewOfSection`, `NtClose`) are dynamically resolved from `ntdll.dll`, ensuring that the functions used are the ones provided by the trusted system library. 📜
