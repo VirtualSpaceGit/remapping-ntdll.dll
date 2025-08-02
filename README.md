@@ -1,4 +1,4 @@
-# 🔐 Secure Section Mapping with Windows Native API
+# Remapping ntdll.dll 🛡
 
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
