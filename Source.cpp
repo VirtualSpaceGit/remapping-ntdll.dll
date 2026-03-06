@@ -80,7 +80,7 @@ int main() {
 
     HANDLE sectionHandle = nullptr;
     LARGE_INTEGER sectionSize = { 0 };
-    sectionSize.QuadPart = 0x207000;  // 2MB section size
+    sectionSize.QuadPart = 0x400000;  // 4MB section size
 
     // Create a section
     NTSTATUS status = NtCreateSection(
