@@ -125,7 +125,8 @@ int main() {
     PrintSectionInfo(baseAddress, viewSize);
 
     // Compare the first 0x1000 bytes of the original and newly mapped ntdll.dll
-    if (memcmp(hOriginalNtdll, baseAddress, 0x1000) == 0) {
+    bool pagesMatch = memcmp(hOriginalNtdll, baseAddress, 0x1000) == 0;
+    if (pagesMatch) {
         std::cout << "[+] The first page of the original and newly mapped ntdll.dll are identical." << std::endl;
     }
     else {
