@@ -45,10 +45,24 @@ typedef NTSTATUS(NTAPI* NtMapViewOfSection_t)(
     ULONG Win32Protect
     );
 
+typedef NTSTATUS(NTAPI* NtUnmapViewOfSection_t)(HANDLE ProcessHandle, PVOID BaseAddress);
 typedef NTSTATUS(NTAPI* NtClose_t)(HANDLE Handle);
 
 void PrintSectionInfo(void* baseAddress, SIZE_T viewSize) {
     std::cout << "[*] Section mapped at " << baseAddress << " with size " << std::hex << viewSize << std::endl;
+}
+
+static bool ResolveNtdllFunctions(HMODULE hNtdll,
+    NtCreateSection_t& NtCreateSection,
+    NtMapViewOfSection_t& NtMapViewOfSection,
+    NtUnmapViewOfSection_t& NtUnmapViewOfSection,
+    NtClose_t& NtClose)
+{
+    NtCreateSection = (NtCreateSection_t)GetProcAddress(hNtdll, "NtCreateSection");
+    NtMapViewOfSection = (NtMapViewOfSection_t)GetProcAddress(hNtdll, "NtMapViewOfSection");
+    NtUnmapViewOfSection = (NtUnmapViewOfSection_t)GetProcAddress(hNtdll, "NtUnmapViewOfSection");
+    NtClose = (NtClose_t)GetProcAddress(hNtdll, "NtClose");
+    return NtCreateSection && NtMapViewOfSection && NtUnmapViewOfSection && NtClose;
 }
 
 int main() {
@@ -58,19 +72,18 @@ int main() {
         return -1;
     }
 
-    // Resolve necessary functions from ntdll
-    auto NtCreateSection = (NtCreateSection_t)GetProcAddress(hNtdll, "NtCreateSection");
-    auto NtMapViewOfSection = (NtMapViewOfSection_t)GetProcAddress(hNtdll, "NtMapViewOfSection");
-    auto NtClose = (NtClose_t)GetProcAddress(hNtdll, "NtClose");
+    NtCreateSection_t NtCreateSection = nullptr;
+    NtMapViewOfSection_t NtMapViewOfSection = nullptr;
+    NtUnmapViewOfSection_t NtUnmapViewOfSection = nullptr;
+    NtClose_t NtClose = nullptr;
 
-    if (!NtCreateSection || !NtMapViewOfSection || !NtClose) {
+    if (!ResolveNtdllFunctions(hNtdll, NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, NtClose)) {
         std::cerr << "[-] Failed to resolve functions from ntdll.dll" << std::endl;
         return -1;
     }
 
     std::cout << "[+] Successfully loaded and resolved functions from ntdll.dll" << std::endl;
 
-    // Get the base address of the original ntdll.dll
     HMODULE hOriginalNtdll = GetModuleHandle(L"ntdll.dll");
     if (!hOriginalNtdll) {
         std::cerr << "[-] Failed to get handle to original ntdll.dll" << std::endl;
@@ -80,9 +93,8 @@ int main() {
 
     HANDLE sectionHandle = nullptr;
     LARGE_INTEGER sectionSize = { 0 };
-    sectionSize.QuadPart = 0x800000;  // 8MB section size
+    sectionSize.QuadPart = 0x800000;
 
-    // Create a section
     NTSTATUS status = NtCreateSection(
         &sectionHandle,
         SECTION_ALL_ACCESS,
@@ -100,7 +112,6 @@ int main() {
 
     std::cout << "[+] NtCreateSection successful, handle: " << sectionHandle << std::endl;
 
-    // Map the section into memory
     PVOID baseAddress = nullptr;
     SIZE_T viewSize = 0;
     status = NtMapViewOfSection(
@@ -111,7 +122,7 @@ int main() {
         0,
         nullptr,
         &viewSize,
-        2,  // View share
+        2,
         0,
         PAGE_READWRITE
     );
@@ -124,7 +135,6 @@ int main() {
 
     PrintSectionInfo(baseAddress, viewSize);
 
-    // Compare the first 0x1000 bytes of the original and newly mapped ntdll.dll
     bool pagesMatch = memcmp(hOriginalNtdll, baseAddress, 0x1000) == 0;
     if (pagesMatch) {
         std::cout << "[+] The first page of the original and newly mapped ntdll.dll are identical." << std::endl;
@@ -133,13 +143,13 @@ int main() {
         std::cout << "[-] The first page of the original and newly mapped ntdll.dll are different." << std::endl;
     }
 
-    // Perform modifications (for demonstration purposes, we'll zero out the first part of the mapped section)
-    memset(baseAddress, 0, 0x1000);  // Clear first page of the section
+    memset(baseAddress, 0, 0x1000);
     std::cout << "[+] Modified the section's first page in memory." << std::endl;
 
-    // Unmap and close the section
-    NtClose(sectionHandle);
+    NtUnmapViewOfSection(GetCurrentProcess(), baseAddress);
+    std::cout << "[+] Section view unmapped." << std::endl;
 
+    NtClose(sectionHandle);
     std::cout << "[+] Section handle closed." << std::endl;
 
     Sleep(30000);
