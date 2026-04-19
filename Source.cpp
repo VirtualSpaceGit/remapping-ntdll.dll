@@ -52,6 +52,10 @@ void PrintSectionInfo(void* baseAddress, SIZE_T viewSize) {
     std::cout << "[*] Section mapped at " << baseAddress << " with size " << std::hex << viewSize << std::endl;
 }
 
+static bool ValidateSectionSize(LONGLONG size) {
+    return size > 0 && size <= 0x10000000;
+}
+
 static bool ResolveNtdllFunctions(HMODULE hNtdll,
     NtCreateSection_t& NtCreateSection,
     NtMapViewOfSection_t& NtMapViewOfSection,
@@ -94,6 +98,11 @@ int main() {
     HANDLE sectionHandle = nullptr;
     LARGE_INTEGER sectionSize = { 0 };
     sectionSize.QuadPart = 0x800000;
+
+    if (!ValidateSectionSize(sectionSize.QuadPart)) {
+        std::cerr << "[-] Invalid section size specified" << std::endl;
+        return -1;
+    }
 
     NTSTATUS status = NtCreateSection(
         &sectionHandle,
