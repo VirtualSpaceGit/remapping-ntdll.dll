@@ -69,6 +69,15 @@ static bool ResolveNtdllFunctions(HMODULE hNtdll,
     return NtCreateSection && NtMapViewOfSection && NtUnmapViewOfSection && NtClose;
 }
 
+static bool WritePatternToSection(PVOID baseAddress, SIZE_T viewSize, BYTE pattern) {
+    if (!baseAddress || viewSize == 0) {
+        return false;
+    }
+    SIZE_T writeSize = min(viewSize, (SIZE_T)0x1000);
+    memset(baseAddress, pattern, writeSize);
+    return true;
+}
+
 int main() {
     HMODULE hNtdll = LoadLibrary(L"ntdll.dll");
     if (!hNtdll) {
@@ -152,7 +161,12 @@ int main() {
         std::cout << "[-] The first page of the original and newly mapped ntdll.dll are different." << std::endl;
     }
 
-    memset(baseAddress, 0, 0x1000);
+    if (!WritePatternToSection(baseAddress, viewSize, 0x00)) {
+        std::cerr << "[-] Failed to write pattern to section" << std::endl;
+        NtUnmapViewOfSection(GetCurrentProcess(), baseAddress);
+        NtClose(sectionHandle);
+        return -1;
+    }
     std::cout << "[+] Modified the section's first page in memory." << std::endl;
 
     NtUnmapViewOfSection(GetCurrentProcess(), baseAddress);
