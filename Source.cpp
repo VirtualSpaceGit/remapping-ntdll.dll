@@ -1,181 +1,220 @@
-#include <Windows.h>
-#include <iostream>
+// SPDX-License-Identifier: MIT
+//
+// ntdll.dll in-memory integrity scanner (defensive, read-only).
+//
+// This program loads the on-disk copy of ntdll.dll into a private SEC_IMAGE
+// mapping using the native section APIs, then walks the .text section of the
+// already-loaded ntdll and compares every page with the freshly-mapped clean
+// copy. When a divergence is found, it identifies which exported function the
+// divergence falls inside (via the export directory of the on-disk copy) and
+// prints a structured report.
+//
+// It is strictly read-only:
+//   - the loaded ntdll image is never written to,
+//   - no other process is opened or inspected,
+//   - no network calls are made,
+//   - the clean copy is mapped PAGE_READONLY via SECTION_MAP_READ.
+//
+// Reference: https://virtualspacesec.com
+
+#include <windows.h>
+#include <winternl.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
 
 #ifndef NT_SUCCESS
-#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
 #endif
 
-typedef struct _OBJECT_ATTRIBUTES {
-    ULONG Length;
-    HANDLE RootDirectory;
-    ULONG Attributes;
-    PVOID SecurityDescriptor;
-    PVOID SecurityQualityOfService;
-} OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
+#ifndef SEC_IMAGE
+#define SEC_IMAGE 0x01000000
+#endif
 
-#define InitializeObjectAttributes( p, n, a, r, s ) { \
-    (p)->Length = sizeof( OBJECT_ATTRIBUTES );        \
-    (p)->RootDirectory = r;                           \
-    (p)->Attributes = a;                              \
-    (p)->ObjectName = n;                              \
-    (p)->SecurityDescriptor = s;                      \
-    (p)->SecurityQualityOfService = NULL;             \
-}
+#define VS_PAGE_SIZE 0x1000
 
 typedef NTSTATUS(NTAPI* NtCreateSection_t)(
-    PHANDLE SectionHandle,
-    ACCESS_MASK DesiredAccess,
-    POBJECT_ATTRIBUTES ObjectAttributes,
-    PLARGE_INTEGER MaximumSize,
-    ULONG SectionPageProtection,
-    ULONG AllocationAttributes,
-    HANDLE FileHandle
-    );
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+    PLARGE_INTEGER, ULONG, ULONG, HANDLE);
 
 typedef NTSTATUS(NTAPI* NtMapViewOfSection_t)(
-    HANDLE SectionHandle,
-    HANDLE ProcessHandle,
-    PVOID* BaseAddress,
-    ULONG_PTR ZeroBits,
-    SIZE_T CommitSize,
-    PLARGE_INTEGER SectionOffset,
-    PSIZE_T ViewSize,
-    DWORD InheritDisposition,
-    ULONG AllocationType,
-    ULONG Win32Protect
-    );
+    HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
+    PLARGE_INTEGER, PSIZE_T, DWORD, ULONG, ULONG);
 
-typedef NTSTATUS(NTAPI* NtUnmapViewOfSection_t)(HANDLE ProcessHandle, PVOID BaseAddress);
-typedef NTSTATUS(NTAPI* NtClose_t)(HANDLE Handle);
+typedef NTSTATUS(NTAPI* NtUnmapViewOfSection_t)(HANDLE, PVOID);
+typedef NTSTATUS(NTAPI* NtClose_t)(HANDLE);
 
-void PrintSectionInfo(void* baseAddress, SIZE_T viewSize) {
-    std::cout << "[*] Section mapped at " << baseAddress << " with size " << std::hex << viewSize << std::endl;
+struct NtdllApi {
+    NtCreateSection_t      NtCreateSection;
+    NtMapViewOfSection_t   NtMapViewOfSection;
+    NtUnmapViewOfSection_t NtUnmapViewOfSection;
+    NtClose_t              NtClose;
+};
+
+static bool ResolveNtdll(NtdllApi& api) {
+    HMODULE h = GetModuleHandleW(L"ntdll.dll");
+    if (!h) return false;
+    api.NtCreateSection      = (NtCreateSection_t)     GetProcAddress(h, "NtCreateSection");
+    api.NtMapViewOfSection   = (NtMapViewOfSection_t)  GetProcAddress(h, "NtMapViewOfSection");
+    api.NtUnmapViewOfSection = (NtUnmapViewOfSection_t)GetProcAddress(h, "NtUnmapViewOfSection");
+    api.NtClose              = (NtClose_t)             GetProcAddress(h, "NtClose");
+    return api.NtCreateSection && api.NtMapViewOfSection
+        && api.NtUnmapViewOfSection && api.NtClose;
 }
 
-static bool ValidateSectionSize(LONGLONG size) {
-    return size > 0 && size <= 0x10000000;
+// Loads ntdll.dll from disk into a private SEC_IMAGE mapping, so the PE is
+// laid out in memory exactly as the loader would lay it out - but in a copy
+// independent of the loader's. The caller owns the returned base and must
+// NtUnmapViewOfSection it.
+static PVOID MapCleanNtdllFromDisk(const NtdllApi& api) {
+    WCHAR path[MAX_PATH];
+    UINT n = GetSystemDirectoryW(path, MAX_PATH);
+    if (n == 0 || n > MAX_PATH - 12) return nullptr;
+    wcscat_s(path, MAX_PATH, L"\\ntdll.dll");
+
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return nullptr;
+
+    HANDLE hSection = nullptr;
+    NTSTATUS st = api.NtCreateSection(
+        &hSection, SECTION_MAP_READ | SECTION_QUERY,
+        nullptr, nullptr,
+        PAGE_READONLY, SEC_IMAGE, hFile);
+    CloseHandle(hFile);
+    if (!NT_SUCCESS(st)) return nullptr;
+
+    PVOID base = nullptr;
+    SIZE_T viewSize = 0;
+    st = api.NtMapViewOfSection(
+        hSection, GetCurrentProcess(), &base,
+        0, 0, nullptr, &viewSize,
+        2 /* ViewUnmap */, 0, PAGE_READONLY);
+    api.NtClose(hSection);
+    if (!NT_SUCCESS(st)) return nullptr;
+    return base;
 }
 
-static bool ResolveNtdllFunctions(HMODULE hNtdll,
-    NtCreateSection_t& NtCreateSection,
-    NtMapViewOfSection_t& NtMapViewOfSection,
-    NtUnmapViewOfSection_t& NtUnmapViewOfSection,
-    NtClose_t& NtClose)
-{
-    NtCreateSection = (NtCreateSection_t)GetProcAddress(hNtdll, "NtCreateSection");
-    NtMapViewOfSection = (NtMapViewOfSection_t)GetProcAddress(hNtdll, "NtMapViewOfSection");
-    NtUnmapViewOfSection = (NtUnmapViewOfSection_t)GetProcAddress(hNtdll, "NtUnmapViewOfSection");
-    NtClose = (NtClose_t)GetProcAddress(hNtdll, "NtClose");
-    return NtCreateSection && NtMapViewOfSection && NtUnmapViewOfSection && NtClose;
-}
+// Locates a .text section within a PE loaded at `base`. Returns true on
+// success and fills the section base + virtual size in bytes.
+static bool FindTextSection(PVOID base, PVOID& textBase, SIZE_T& textSize) {
+    auto dos = (PIMAGE_DOS_HEADER)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto nt = (PIMAGE_NT_HEADERS)((BYTE*)base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
 
-static bool WritePatternToSection(PVOID baseAddress, SIZE_T viewSize, BYTE pattern) {
-    if (!baseAddress || viewSize == 0) {
-        return false;
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (memcmp(sec[i].Name, ".text", 6) == 0) {
+            textBase = (BYTE*)base + sec[i].VirtualAddress;
+            textSize = sec[i].Misc.VirtualSize;
+            return true;
+        }
     }
-    SIZE_T writeSize = min(viewSize, (SIZE_T)0x1000);
-    memset(baseAddress, pattern, writeSize);
-    return true;
+    return false;
+}
+
+// Walks the export directory of the on-disk copy at `cleanBase` and returns
+// the name of the export whose start RVA is the largest one not greater than
+// `rva` - i.e. the named export the divergence most likely falls inside. The
+// export table does not carry function sizes, so this is a best-effort
+// containing-export lookup; for ntdll.dll, where named exports are densely
+// packed, it is accurate in practice.
+static const char* ExportNameForRva(PVOID cleanBase, DWORD rva) {
+    auto dos = (PIMAGE_DOS_HEADER)cleanBase;
+    auto nt  = (PIMAGE_NT_HEADERS)((BYTE*)cleanBase + dos->e_lfanew);
+    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (dir.VirtualAddress == 0 || dir.Size == 0) return nullptr;
+
+    auto exp      = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)cleanBase + dir.VirtualAddress);
+    auto funcs    = (DWORD*)((BYTE*)cleanBase + exp->AddressOfFunctions);
+    auto names    = (DWORD*)((BYTE*)cleanBase + exp->AddressOfNames);
+    auto ordinals = (WORD*) ((BYTE*)cleanBase + exp->AddressOfNameOrdinals);
+
+    const char* best = nullptr;
+    DWORD bestStart = 0;
+    for (DWORD i = 0; i < exp->NumberOfNames; ++i) {
+        WORD ord = ordinals[i];
+        DWORD fnRva = funcs[ord];
+        if (fnRva <= rva && fnRva > bestStart) {
+            bestStart = fnRva;
+            best = (const char*)((BYTE*)cleanBase + names[i]);
+        }
+    }
+    return best;
 }
 
 int main() {
-    HMODULE hNtdll = LoadLibrary(L"ntdll.dll");
-    if (!hNtdll) {
-        std::cerr << "[-] Failed to load ntdll.dll" << std::endl;
-        return -1;
+    NtdllApi api{};
+    if (!ResolveNtdll(api)) {
+        fprintf(stderr, "[-] Failed to resolve required ntdll exports.\n");
+        return 1;
     }
 
-    NtCreateSection_t NtCreateSection = nullptr;
-    NtMapViewOfSection_t NtMapViewOfSection = nullptr;
-    NtUnmapViewOfSection_t NtUnmapViewOfSection = nullptr;
-    NtClose_t NtClose = nullptr;
+    HMODULE loaded = GetModuleHandleW(L"ntdll.dll");
+    if (!loaded) {
+        fprintf(stderr, "[-] Loaded ntdll.dll handle unavailable.\n");
+        return 1;
+    }
+    printf("[i] Loaded ntdll.dll image base: %p\n", (void*)loaded);
 
-    if (!ResolveNtdllFunctions(hNtdll, NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection, NtClose)) {
-        std::cerr << "[-] Failed to resolve functions from ntdll.dll" << std::endl;
-        return -1;
+    PVOID clean = MapCleanNtdllFromDisk(api);
+    if (!clean) {
+        fprintf(stderr, "[-] Failed to map clean on-disk copy of ntdll.dll.\n");
+        return 1;
+    }
+    printf("[i] Clean on-disk copy mapped at:  %p\n", clean);
+
+    PVOID loadedText = nullptr;
+    PVOID cleanText  = nullptr;
+    SIZE_T loadedSize = 0;
+    SIZE_T cleanSize  = 0;
+    if (!FindTextSection(loaded, loadedText, loadedSize) ||
+        !FindTextSection(clean,  cleanText,  cleanSize)) {
+        fprintf(stderr, "[-] Could not locate .text in one of the copies.\n");
+        api.NtUnmapViewOfSection(GetCurrentProcess(), clean);
+        return 1;
+    }
+    SIZE_T cmpSize = (loadedSize < cleanSize) ? loadedSize : cleanSize;
+    printf("[i] Comparing %zu bytes of .text\n\n", cmpSize);
+
+    SIZE_T mismatchPages = 0;
+    SIZE_T totalPages    = (cmpSize + VS_PAGE_SIZE - 1) / VS_PAGE_SIZE;
+
+    for (SIZE_T page = 0; page < totalPages; ++page) {
+        SIZE_T offset = page * VS_PAGE_SIZE;
+        SIZE_T n = (cmpSize - offset < VS_PAGE_SIZE) ? (cmpSize - offset) : VS_PAGE_SIZE;
+        BYTE* a = (BYTE*)loadedText + offset;
+        BYTE* b = (BYTE*)cleanText  + offset;
+        if (memcmp(a, b, n) == 0) continue;
+
+        ++mismatchPages;
+
+        // Locate the first differing byte for reporting.
+        SIZE_T firstDelta = 0;
+        for (; firstDelta < n; ++firstDelta) {
+            if (a[firstDelta] != b[firstDelta]) break;
+        }
+
+        // RVA of the divergence inside the loaded image.
+        DWORD rva = (DWORD)((BYTE*)loadedText - (BYTE*)loaded)
+                  + (DWORD)offset + (DWORD)firstDelta;
+
+        const char* name = ExportNameForRva(clean, rva);
+        printf("[!] Divergence at page %zu (RVA 0x%08lx) inside %s\n",
+               page, (unsigned long)rva,
+               name ? name : "<unresolved>");
     }
 
-    std::cout << "[+] Successfully loaded and resolved functions from ntdll.dll" << std::endl;
-
-    HMODULE hOriginalNtdll = GetModuleHandle(L"ntdll.dll");
-    if (!hOriginalNtdll) {
-        std::cerr << "[-] Failed to get handle to original ntdll.dll" << std::endl;
-        return -1;
-    }
-    std::cout << "[+] Original ntdll.dll loaded at: " << hOriginalNtdll << std::endl;
-
-    HANDLE sectionHandle = nullptr;
-    LARGE_INTEGER sectionSize = { 0 };
-    sectionSize.QuadPart = 0x800000;
-
-    if (!ValidateSectionSize(sectionSize.QuadPart)) {
-        std::cerr << "[-] Invalid section size specified" << std::endl;
-        return -1;
+    printf("\n[=] Pages checked:    %zu\n", totalPages);
+    printf("[=] Pages diverging:  %zu\n", mismatchPages);
+    if (mismatchPages == 0) {
+        printf("[+] Loaded ntdll .text matches the clean on-disk copy.\n");
+    } else {
+        printf("[!] Loaded ntdll .text diverges from the clean on-disk copy.\n");
     }
 
-    NTSTATUS status = NtCreateSection(
-        &sectionHandle,
-        SECTION_ALL_ACCESS,
-        nullptr,
-        &sectionSize,
-        PAGE_READWRITE,
-        SEC_COMMIT,
-        nullptr
-    );
-
-    if (!NT_SUCCESS(status)) {
-        std::cerr << "[-] Failed to create section" << std::endl;
-        return -1;
-    }
-
-    std::cout << "[+] NtCreateSection successful, handle: " << sectionHandle << std::endl;
-
-    PVOID baseAddress = nullptr;
-    SIZE_T viewSize = 0;
-    status = NtMapViewOfSection(
-        sectionHandle,
-        GetCurrentProcess(),
-        &baseAddress,
-        0,
-        0,
-        nullptr,
-        &viewSize,
-        2,
-        0,
-        PAGE_READWRITE
-    );
-
-    if (!NT_SUCCESS(status)) {
-        std::cerr << "[-] Failed to map section into memory" << std::endl;
-        NtClose(sectionHandle);
-        return -1;
-    }
-
-    PrintSectionInfo(baseAddress, viewSize);
-
-    bool pagesMatch = memcmp(hOriginalNtdll, baseAddress, 0x1000) == 0;
-    if (pagesMatch) {
-        std::cout << "[+] The first page of the original and newly mapped ntdll.dll are identical." << std::endl;
-    }
-    else {
-        std::cout << "[-] The first page of the original and newly mapped ntdll.dll are different." << std::endl;
-    }
-
-    if (!WritePatternToSection(baseAddress, viewSize, 0x00)) {
-        std::cerr << "[-] Failed to write pattern to section" << std::endl;
-        NtUnmapViewOfSection(GetCurrentProcess(), baseAddress);
-        NtClose(sectionHandle);
-        return -1;
-    }
-    std::cout << "[+] Modified the section's first page in memory." << std::endl;
-
-    NtUnmapViewOfSection(GetCurrentProcess(), baseAddress);
-    std::cout << "[+] Section view unmapped." << std::endl;
-
-    NtClose(sectionHandle);
-    std::cout << "[+] Section handle closed." << std::endl;
-
-    Sleep(30000);
-
-    return 0;
+    api.NtUnmapViewOfSection(GetCurrentProcess(), clean);
+    return mismatchPages == 0 ? 0 : 2;
 }
